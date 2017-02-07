@@ -28,6 +28,7 @@ from __future__ import absolute_import, print_function
 
 import json
 import uuid
+from random import shuffle
 
 import pytz
 from celery.messaging import establish_connection
@@ -40,6 +41,56 @@ from mock import MagicMock, patch
 
 from invenio_indexer.api import RecordIndexer
 from invenio_indexer.signals import before_record_index
+
+
+def test_deduplicate_action(app, queue):
+    """Test deduplicate action."""
+    with app.app_context():
+        with establish_connection() as c:
+            indexer = RecordIndexer()
+            id1 = uuid.uuid4()
+            id2 = uuid.uuid4()
+            # index records many times (big than a batch)
+            for index in range(app.config['INDEXER_INDEX_BATCH_SIZE']):
+                mylist = [id1, id2]
+                shuffle(mylist)
+                indexer.bulk_index(mylist)
+            indexer.bulk_delete([id2, id1])
+
+            consumer = Consumer(
+                connection=c,
+                queue=indexer.mq_queue.name,
+                exchange=indexer.mq_exchange.name,
+                routing_key=indexer.mq_routing_key)
+
+            payloads = list(RecordIndexer._action_deduplicate(
+                consumer.iterqueue()
+            ))
+            assert len(payloads) == 6
+            assert{
+                    'doc_type': None,
+                    'index': None,
+                    'id': str(id2),
+                    'op': 'index',
+            } in payloads[0:4]
+            assert {
+                    'doc_type': None,
+                    'index': None,
+                    'id': str(id1),
+                    'op': 'index',
+            } in payloads[0:4]
+            assert {
+                    'doc_type': None,
+                    'index': None,
+                    'id': str(id2),
+                    'op': 'delete',
+                } in payloads[-2:]
+            assert {
+                    'doc_type': None,
+                    'index': None,
+                    'id': str(id1),
+                    'op': 'delete',
+            } in payloads[-2:]
 
 
 def test_indexer_bulk_index(app, queue):

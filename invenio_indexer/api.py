@@ -32,11 +32,12 @@ from contextlib import contextmanager
 import pytz
 from celery.messaging import establish_connection
 from elasticsearch.helpers import bulk
-from flask import current_app
+from flask import current_app as app
 from invenio_records.api import Record
 from invenio_search import current_search_client
 from kombu import Producer as KombuProducer
 from kombu.compat import Consumer
+from six.moves import zip_longest
 from sqlalchemy.orm.exc import NoResultFound
 
 from .proxies import current_record_to_index
@@ -190,7 +191,7 @@ class RecordIndexer(object):
 
             count = bulk(
                 self.client,
-                self._actionsiter(consumer.iterqueue()),
+                self._actionsiter(RecordIndexer._action_deduplicate(consumer.iterqueue())),
                 stats_only=True,
                 request_timeout=req_timeout,
             )
@@ -231,23 +232,38 @@ class RecordIndexer(object):
                     doc_type=doc_type
                 ))
 
-    def _actionsiter(self, message_iterator):
+    @classmethod
+    def _action_deduplicate(cls, message_iterator):
+        #  for message in message_iterator:
+        BATCH = app.config['INDEXER_INDEX_BATCH_SIZE']
+        while True:
+            # get a batch
+            messages = filter(None, next(
+                zip_longest(*[message_iterator]*BATCH, fillvalue=None)
+            ))
+            # deduplicate the batch
+            deduplicated = [dict(t) for t in set([
+                tuple(d.decode().items()) for d in messages
+            ])]
+            for payload in deduplicated:
+                yield payload
+            for message in messages:
+                message.ack()
+            if len(messages) < BATCH:
+                raise StopIteration
+
+    def _actionsiter(self, payloads_iterator):
         """Iterate bulk actions.
 
-        :param message_iterator: Iterator yielding messages from a queue.
+        :param payloads_iterator: Iterator yielding messages from a queue.
         """
-        for message in message_iterator:
-            payload = message.decode()
+        for payload in payloads_iterator:
             try:
                 if payload['op'] == 'delete':
                     yield self._delete_action(payload)
                 else:
                     yield self._index_action(payload)
-                message.ack()
-            except NoResultFound:
-                message.reject()
             except Exception:
-                message.reject()
                 current_app.logger.error(
                     "Failed to index record {0}".format(payload.get('id')),
                     exc_info=True)
