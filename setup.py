@@ -47,7 +47,8 @@ tests_require = [
 
 extras_require = {
     'docs': [
-        'Sphinx>=1.5.1,<1.6'
+        'Sphinx>=1.5.1,<1.6',
+        'celery<4.0',
     ],
     'tests': tests_require,
 }
@@ -61,7 +62,6 @@ setup_requires = [
 ]
 
 install_requires = [
-    'celery<4.0.0',
     'Flask>=0.11.1',
     'Flask-CeleryExt>=0.2.2',
     'invenio-records>=1.0.0a8',
